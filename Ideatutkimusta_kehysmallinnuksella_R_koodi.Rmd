@@ -1,0 +1,510 @@
+---
+title: "Ideatutkimusta_kehysmallinnuksella_R_koodi"
+author: "Katja Kivikoski"
+date: '2023-03-20'
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Tämä tiedosto sisältää kaikki maisterintutkielmassa käytetyt R-Koodit.
+
+# Ladataan tarvittavat paketit
+```{r}
+library(readxl)
+library(tidyverse)
+library(stm)
+library(tm)
+library(tidyr)
+library(stringr)
+```
+
+# Aineiston rajaus ja esikäsittely
+
+## Ladataan eduskunnan Excel-taulukot ja yhdistetään ne
+```{r}
+# Ladataan eduskunnan aineistoista Puheenvuorot-välilehtien tiedot:
+eduskunta_2015 <- read_excel("Kansanedustajien-puheenvuorot-taysistunnoissa-2015-2018.xlsx", "Puheenvuorot")
+eduskunta_2019 <- read_excel("T__ysistuntojen_puheenvuorot_23082022.xlsx", "Puheenvuorot")
+
+# Muutetaan taulukoiden otsikot yhteneviksi:
+names(eduskunta_2019) <- tolower(names(eduskunta_2019))
+names(eduskunta_2019)[2] <- "vireilletuloasia"
+
+# Yhdistetään taulukot:
+eduskunta_kaikki <- rbind(eduskunta_2015, eduskunta_2019)
+```
+
+## Rajataan aineisto
+```{r}
+# Poistetaan eduskunnan valtioneuvoston oikeuskanslerin, apulaisoikeuskanslerin ja eduskunnan oikeusasiamiehen puheenvuorot:
+eduskunta_rajattu <- eduskunta_kaikki[!(eduskunta_kaikki$sukunimi=="Jonkka" | eduskunta_kaikki$sukunimi=="Pöysti" | eduskunta_kaikki$sukunimi=="Hiekkataipale" | eduskunta_kaikki$sukunimi=="Jääskeläinen"),]
+
+# Poistetaan vuonna 2022 pidetyt puheenvuorot:
+eduskunta_rajattu <- eduskunta_rajattu[eduskunta_rajattu$aloitusajankohta < "2022-01-04 16:01:30", ]
+
+#Poistetaan puheenvuoroista välihuudot, puhemiehen kommentit ja koputukset (käytännössä siis sulut ja hakasulkeet sekä niiden sisällä olevat tekstit):
+eduskunta_virkkeet <- eduskunta_rajattu %>% 
+  mutate(puheenvuoro = str_replace_all(puheenvuoro, "\\s*\\([^\\)]+\\)", ""))
+eduskunta_virkkeet <- eduskunta_virkkeet %>%
+  mutate(puheenvuoro = str_replace_all(puheenvuoro, "\\s*\\[[^\\]]+\\]", ""))
+
+#Jaetaan puheenvuorot yksittäisiin virkkeisiin:
+eduskunta_virkkeet <- eduskunta_virkkeet %>% separate_rows(puheenvuoro, sep = '\\. |\\? |\\! |\\: |\\.”|\\?”|\\!”|\\."|\\?"|\\!"')
+
+# Luodaan taulukko, johon on poimittu kaikki virkkeet, joissa on mainittu hyvinvoi tai Hyvinvoi:
+hyvinvointi_virkkeet <- eduskunta_virkkeet %>% filter(str_detect(puheenvuoro, "\\w*hyvinvoi\\w*|\\w*Hyvinvoi\\w*"))
+
+# Indeksoidaan hyvinvointivirkkeet ja nimetään virkkeet sisältävä sarake uudelleen:
+hyvinvointi_virkkeet <- tibble::rowid_to_column(hyvinvointi_virkkeet, "virkkeen_id")
+hyvinvointi_virkkeet <- rename(hyvinvointi_virkkeet, virke = puheenvuoro)
+```
+
+## Luodaan TurkuNLP:n parseriin syötettävä txt-tiedosto
+```{r}
+# Lemmattavaaa txt-tiedostoa varten poimitaan uuteen taulukkoon virkeen id ja virkkeet:
+lemmattava_aineisto = subset(hyvinvointi_virkkeet, select = c (virkkeen_id, virke))
+lemmattava_aineisto$virke <- tolower(lemmattava_aineisto$virke)
+lemmattava_aineisto$virke <- removePunctuation(lemmattava_aineisto$virke)
+lemmattava_aineisto$virke <- gsub("—", "", lemmattava_aineisto$virke)
+
+
+# Lisätään id-numeron eteen "###C: " ja luodaa kaksi tyhjää saraketta:
+lemmattava_aineisto$virkkeen_id <-sub("^","###C:", lemmattava_aineisto$virkkeen_id)
+lemmattava_aineisto <- add_column(lemmattava_aineisto, a = "", .before = 1)
+lemmattava_aineisto <- add_column(lemmattava_aineisto, b = "", .before = 3)
+
+# Luodaan UTF-8-muotoinen txt-tiedosto:
+write_delim(lemmattava_aineisto, delim = "\n", file = "lemmattava_txt.txt", col_names = FALSE)
+```
+
+## Syötetään txt-tiedosto TurkuNLP:n parserille lemmattavaksi
+Tässä vaiheessa siirrytään Google Colab-ympäristöön. Kirjaudu omalle Google-tilillesi ja lataa edellä luotu lemmattava_txt-tiedosto sekä Ideatutkimusta_kehysmallinnuksella_Python_koodi-tiedosto Google Drive kansioosi. Avaa Drivessa jälkimmäinen tiedosto Python_koodi-tiedosto (avautuu Google Colab-ympäristössä) ja seuraa tiedoston ohjeita.
+
+
+Jatka tästä aineiston lemmaamisen jälkeen.
+
+
+## Tuodaan lemmattu aineisto ja siistitään se
+```{r}
+# Tuodaan lemmattu aineisto ja tehdään siitä taulukko:
+lemmattu_aineisto <- readLines("lemmattu_aineisto.csv")
+lemmat_taulukko <- data.frame(lemmattu_aineisto)
+
+# Yhdistetään taulukkoon hyvinvointivirkkeiden metatiedot:
+lemmat_taulukko <- tibble::rowid_to_column(lemmat_taulukko, "virkkeen_id")
+hyvinvointilemmat <- merge(hyvinvointi_virkkeet, lemmat_taulukko, by="virkkeen_id")
+
+# Erotellaan lemmat pilkkujen sijaan välilyönnein:
+hyvinvointilemmat$lemmat <- gsub(",", " ", hyvinvointilemmat$lemmat)
+
+#Poistetaan #-merkit:
+hyvinvointilemmat$lemmat <- gsub("#", "", hyvinvointilemmat$lemmat)
+
+# Siistitään ääkköset ja muut sotkut
+hyvinvointilemmat$lemmat <- gsub("Ã¤", "ä", hyvinvointilemmat$lemmat)
+hyvinvointilemmat$lemmat <- gsub("Ã", "ö", hyvinvointilemmat$lemmat)
+hyvinvointilemmat$lemmat <- gsub("â€", "", hyvinvointilemmat$lemmat)
+hyvinvointilemmat$lemmat <- gsub("Â¨a", "", hyvinvointilemmat$lemmat)
+hyvinvointilemmat$lemmat <- gsub("Â¨n", "", hyvinvointilemmat$lemmat)
+```
+
+## Luodaan päivämäärä- ja aikamuuttujat
+```{r}
+# Typistetään puheenvuoron aloitusajankohta vvvv-kk-pp -muotoon
+hyvinvointilemmat$pvm <- as.Date(hyvinvointilemmat$aloitusajankohta)
+
+# Luodaan päivämäärätiedosta jatkuva aikamuuttuja
+hyvinvointilemmat$aika <- as.numeric(hyvinvointilemmat$pvm)
+```
+
+
+## Käsitellään lemmattu aineisto stm-paketin textProcessor-funktiolla.
+```{r}
+# Funktiota varten luodaan ensin oma, stopwords-iso -kirjaston poistosanalistaan perustuva, poistosanalista:
+poistosanat <- stopwords::stopwords("fi", source="stopwords-iso")
+
+# Ajetaan textProcessor funktio:
+prosessoitu <- textProcessor(documents = hyvinvointilemmat$lemmat,
+                           metadata = hyvinvointilemmat,
+                           lowercase = FALSE,
+                           removestopwords = FALSE,
+                           removenumbers = TRUE,
+                           removepunctuation = TRUE,
+                           ucp = TRUE,
+                           stem = FALSE,
+                           wordLengths = c(3, Inf),
+                           sparselevel = 1,
+                           language = "fi",
+                           verbose = TRUE,
+                           onlycharacter = FALSE,
+                           striphtml = FALSE,
+                           customstopwords = poistosanat,
+                           custompunctuation = NULL,
+                           v1 = FALSE)
+```
+
+## prepDocuments funktio
+```{r}
+# Harvinaiset sanat poistava prepDocuments-funktio poistaa kokonaisia virkkeitä, joten tätä tuotosta ei käytetä aihemallinnuksessa:
+ei_kayteta <- prepDocuments(documents = prosessoitu$documents,
+                     vocab = prosessoitu$vocab,
+                     meta = prosessoitu$meta,
+                     lower.thresh = 1,
+                     upper.thresh = Inf,
+                     subsample = NULL,
+                     verbose = TRUE)
+```
+
+## Yhteenveto rajatusta ja esikäsitellystä aineistosta
+```{r}
+# Rajattu ja esikäsitelty aineisto koostuu...
+
+# 10 623 hyvinvointivirkkeestä:
+length(prosessoitu$documents)
+
+# 11 630 erilaisesta lemmasta:
+length(prosessoitu$vocab)
+```
+
+
+# Aihemallinnus
+## Sopivan aihemäärän haarukointi searchK-funktiolla
+Huom. searchK-funktio on raskas laskutoimitus ja sen läpiajossa menee useita tunteja. Jos olet kiinnostunut vain näkemään aihemallinnuksen tulokset, jätä nämä koodit ajamatta ja siirry suoraan riville 218, eli parhaan mallin valintaan.
+```{r}
+# Haarukoidaan sopivaa aihemäärää ensin 10, 20, 30, 40, 50, 60, 70, 80, 90 ja 100 aiheella:
+K_haarukointi_1 <- searchK(documents = prosessoitu$documents,
+                           vocab = prosessoitu$vocab,
+                           K = c(10, 20, 30, 40, 50, 60, 70, 80, 90, 100),
+                           data = prosessoitu$meta,
+                           prevalence = ~s(hyvinvointilemmat$aika), 
+                           init.type = "LDA",
+                           verbose = TRUE, 
+                           heldout.seed = 4389307)
+```
+
+```{r}
+# Luodaan suomenkieliset diagnostiikkakuviot ensimmäiselle searchK-haarukoinnille:
+par(mfrow=c(2,2), mar=c(4, 6, 2.9, 2) + 0.1)
+plot(y = K_haarukointi_1$results$heldout, x= K_haarukointi_1$results$K, ylab = "Ennustusvoima", xlab = "Aihemäärä (K)", type ="o", cex.lab = 1.25, cex.axis = 1.25)
+plot(y = K_haarukointi_1$results$residual, x= K_haarukointi_1$results$K, ylab = "Ennustevirheet", xlab = "Aihemäärä (K)", type ="o", cex.lab = 1.25, cex.axis = 1.25)
+plot(y = K_haarukointi_1$results$semcoh, x= K_haarukointi_1$results$K, ylab = "Sisäinen yhtenäisyys", xlab = "Aihemäärä (K)", type ="o", cex.lab = 1.25, cex.axis = 1.25)
+plot(y = K_haarukointi_1$results$lbound, x= K_haarukointi_1$results$K, ylab = "Marginaaliuskottavuuden\nalaraja", xlab = "Aihemäärä (K)", type ="o", cex.lab = 1.25, cex.axis = 1.25)
+```
+
+```{r}
+# Ajetaan searchK-funktio uudelleen, nyt 10-60 aiheella:
+K_haarukointi_2 <- searchK(documents = prosessoitu$documents,
+                           vocab = prosessoitu$vocab, 
+                           K = c(10:60),
+                           data = prosessoitu$meta,
+                           prevalence = ~s(hyvinvointilemmat$aika), 
+                           init.type = "LDA",
+                           verbose = TRUE, 
+                           heldout.seed = 4389307)
+```
+
+```{r}
+# Luodaan suomenkieliset diagnostiikkakuviot toiselle searchK-haarukoinnille:
+par(mfrow=c(2,2), mar=c(4, 6, 2.9, 2) + 0.1)
+plot(y = K_haarukointi_2$results$heldout, x= K_haarukointi_2$results$K, ylab = "Ennustusvoima", xlab = "Aihemäärä (K)", type ="o", cex.lab = 1.25, cex.axis = 1.25)
+plot(y = K_haarukointi_2$results$residual, x= K_haarukointi_2$results$K, ylab = "Ennustevirheet", xlab = "Aihemäärä (K)", type ="o", cex.lab = 1.25, cex.axis = 1.25)
+plot(y = K_haarukointi_2$results$semcoh, x= K_haarukointi_2$results$K, ylab = "Sisäinen yhtenäisyys", xlab = "Aihemäärä (K)", type ="o", cex.lab = 1.25, cex.axis = 1.25)
+plot(y = K_haarukointi_2$results$lbound, x= K_haarukointi_2$results$K, ylab = "Marginaaliuskottavuuden\nalaraja", xlab = "Aihemäärä (K)", type ="o", cex.lab = 1.25, cex.axis = 1.25)
+```
+
+## Parhaan mallin valinta
+```{r}
+# Lasketaan selectModel-funktiolla 20 mallia:
+valikoi_malli_21 <- selectModel(documents = prosessoitu$documents,
+                                vocab = prosessoitu$vocab,
+                                K = 21, 
+                                data = prosessoitu$meta,
+                                prevalence = ~s(hyvinvointilemmat$aika), 
+                                init.type = "LDA",
+                                verbose = TRUE, 
+                                seed = 4389307, 
+                                runs = 20,
+                                max.em.its = 400)
+```
+
+```{r}
+# Luodaan selectModel-funktion tuloksista kuvio:
+plotModels(valikoi_malli_21, pch = c(1, 2, 3, 4), legend.position = "bottomright", ylab = "Eksklusiivisuus", xlab = "Sisäinen yhtenäisyys")
+```
+
+```{r}
+# Valitaan parhaaksi malliksi malli numero 4:
+malli21 <- valikoi_malli_21$runout[[4]]
+```
+
+
+# Aihemallinnuksen tulosten tarkastelu
+## Luodaan aihemallinnuksen tuotoksista taulukot
+```{r}
+# Aiheiden todennäköisyysjakaumat dokumenteittain:
+aiheet_esiintyvyys <- make.dt(malli21, meta = NULL)
+head(aiheet_esiintyvyys)
+
+
+# Sanojen todennäköisyysjakaumat aiheittain:
+sanat_esiintyvyys <- as.data.frame(malli21$beta)
+sanat_esiintyvyys <- tibble::rowid_to_column(sanat_esiintyvyys, "topic")
+head(sanat_esiintyvyys)
+```
+
+## Luodaan Word-tiedostoon tuotava sisäisen validoinnin taulukko
+```{r}
+# Luodaan lista kunkin aiheen 15 yleisimmästä lemmasta:
+lemmat_15 <- labelTopics(malli21, n=15)
+
+# Luodaan lemmoista taulukko, johon liitetään aiheiden alustavat nimet ja aiheiden yleisyys aineistossa:
+sisainen_validointi <- data.frame(lemmat_15$prob)
+sisainen_validointi <- sisainen_validointi %>% unite(Lemmat, c(X1:X15), sep = ", ", remove = TRUE)
+ka_esiintyvyys <- data.frame(t(round(100*(summarise_all(aiheet_esiintyvyys, mean)), 1)))
+ka_esiintyvyys[] <- lapply(ka_esiintyvyys, paste0, " %")
+ka_esiintyvyys <- ka_esiintyvyys[-1,]
+sisainen_validointi <- cbind(Yleisyys = ka_esiintyvyys, sisainen_validointi)
+aihenimet <- c("1) -",
+               "2) Hyvinvointi- ja terveystutkimus",
+               "3) Tuotantoeläimet",
+               "4) -",
+               "5) Kestävä kehitys",
+               "6) Julkisen talouden tasapaino",
+               "7) Yhteiskunta hyvän elämän mahdollistajana",
+               "8) Hyvinvointivaltion vahvistaminen",
+               "9) -",
+               "10) Kilpailukyky",
+               "11) Suomen asema",
+               "12) Palveluiden uudistus",
+               "13) Tärkeä keskustella",
+               "14) Työhyvinvointi",
+               "15) Tulevaisuuden tekijät",
+               "16) Hyvinvointiyhteiskunnan turvaaminen",
+               "17) Sote-uudistus",
+               "18) Muu maailma",
+               "19) Lapset ja nuoret",
+               "20) Millaiseen palvelujärjestelmään on varaa",
+               "21) -")
+sisainen_validointi <- cbind(Nimet = aihenimet, sisainen_validointi)
+
+# Järjestetään taulukko aiheiden yleisyysjärjestykseen:
+sisainen_validointi <- sisainen_validointi[order(sisainen_validointi$Yleisyys, decreasing=TRUE),]
+sisainen_validointi <- sisainen_validointi %>%
+  select(Nimet, everything())
+
+# Nimetään sarakkeet täsmällisemmin:
+colnames(sisainen_validointi)[1] = "Aiheen numero ja kehyksen alustava nimi"
+colnames(sisainen_validointi)[2] = "Aiheen yleisyys"
+colnames(sisainen_validointi)[3] = "Yleisimmät lemmat järjestyksessä"
+
+
+# Luodaan taulukosta csv-tiedosto, josta tiedot voidaan tuoda Word-tiedostoon:
+write.csv2(sisainen_validointi, "SisainenValidointi.csv", row.names = F)
+
+# Ohje: Avaa csv-tiedosto Notepad-ohjelmassa ja kopioi kaikki teksti. Liitä teksti Word-tiedostoon. Valitse teksti ja muuta se taulukoksi (Lisää/Insert > Taulukko/Table > Muunna teksti taulukoksi / Covert text to table). Etsi ja korvaa taulukosta kaikki "-merkit. Muuta prosenttiosuuksista pisteet desimaalipilkuiksi.
+```
+
+## Poimitaan ulkoisen validoinnin validointivirkkeet
+```{r}
+# Aiheet 1, 4, 9 ja 21 eivät läpäise sisäistä validointia.
+# Poimitaan ulkoiseen validointiin päässeille aiheille Validointivirkkeet, eli kymmenen kutakin aihetta eniten sisältävät virkkeet:
+
+aihe2 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic2, decreasing = TRUE),]
+aihe2 <- aihe2[1:10,]
+
+aihe3 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic3, decreasing = TRUE),]
+aihe3 <- aihe3[1:10,]
+
+aihe5 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic5, decreasing = TRUE),]
+aihe5 <- aihe5[1:10,]
+
+aihe6 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic6, decreasing = TRUE),]
+aihe6 <- aihe6[1:10,]
+
+aihe7 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic7, decreasing = TRUE),]
+aihe7 <- aihe7[1:10,]
+
+aihe8 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic8, decreasing = TRUE),]
+aihe8 <- aihe8[1:10,]
+
+aihe10 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic10, decreasing = TRUE),]
+aihe10 <- aihe10[1:10,]
+
+aihe11 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic11, decreasing = TRUE),]
+aihe11 <- aihe11[1:10,]
+
+aihe12 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic12, decreasing = TRUE),]
+aihe12 <- aihe12[1:10,]
+
+aihe13 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic13, decreasing = TRUE),]
+aihe13 <- aihe13[1:10,]
+
+aihe14 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic14, decreasing = TRUE),]
+aihe14 <- aihe14[1:10,]
+
+aihe15 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic15, decreasing = TRUE),]
+aihe15 <- aihe15[1:10,]
+
+aihe16 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic16, decreasing = TRUE),]
+aihe16 <- aihe16[1:10,]
+
+aihe17 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic17, decreasing = TRUE),]
+aihe17 <- aihe17[1:10,]
+
+aihe18 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic18, decreasing = TRUE),]
+aihe18 <- aihe18[1:10,]
+
+aihe19 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic19, decreasing = TRUE),]
+aihe19 <- aihe19[1:10,]
+
+aihe20 <- aiheet_esiintyvyys[order(aiheet_esiintyvyys$Topic20, decreasing = TRUE),]
+aihe20 <- aihe20[1:10,]
+
+# Luodaan virkkeistä ja halutuista metatiedoista merkkijono:
+hyvinvointi_virkkeet$pvm <- as.Date(hyvinvointi_virkkeet$aloitusajankohta)
+hyvinvointi_virkkeet$validointiin <- str_c('"', hyvinvointi_virkkeet$virke, '." ', hyvinvointi_virkkeet$pvm, ", ", hyvinvointi_virkkeet$vireilletuloasia, ", ", hyvinvointi_virkkeet$etunimi, " ", hyvinvointi_virkkeet$sukunimi)
+
+# Poimitaan validointivirkkeet ja niiden metatiedot:
+validointi2 <- hyvinvointi_virkkeet[c(aihe2$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi3 <- hyvinvointi_virkkeet[c(aihe3$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi5 <- hyvinvointi_virkkeet[c(aihe5$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi6 <- hyvinvointi_virkkeet[c(aihe6$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi7 <- hyvinvointi_virkkeet[c(aihe7$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi8 <- hyvinvointi_virkkeet[c(aihe8$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi10 <- hyvinvointi_virkkeet[c(aihe10$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi11 <- hyvinvointi_virkkeet[c(aihe11$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi12 <- hyvinvointi_virkkeet[c(aihe12$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi13 <- hyvinvointi_virkkeet[c(aihe13$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi14 <- hyvinvointi_virkkeet[c(aihe14$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi15 <- hyvinvointi_virkkeet[c(aihe15$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi16 <- hyvinvointi_virkkeet[c(aihe16$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi17 <- hyvinvointi_virkkeet[c(aihe17$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi18 <- hyvinvointi_virkkeet[c(aihe18$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi19 <- hyvinvointi_virkkeet[c(aihe19$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+validointi20 <- hyvinvointi_virkkeet[c(aihe20$docnum),] %>% select(validointiin) %>% tibble::rownames_to_column()
+
+# Luodaan validointivirkkeistä ja metatiedoista csv-tiedosto, josta tiedot voidaan tuoda Word-tiedostoon:
+write.csv2(c(validointi19,
+             validointi10,
+             validointi17,
+             validointi2,
+             validointi3,
+             validointi16,
+             validointi8,
+             validointi18,
+             validointi11,
+             validointi6,
+             validointi12,
+             validointi14,
+             validointi7,
+             validointi5,
+             validointi13,
+             validointi15,
+             validointi20), "liite1.csv", row.names = F)
+
+# Ohje: Avaa csv-tiedosto Excelissä. Kopioi järjestysnumerot ja validointivirkkeet. Liitä tiedot Word-tiedostoon erillisinä taulukoinaan.
+```
+
+## Luodaan Word-tiedostoon tuotava ulkoisen validoinnin taulukko
+```{r}
+# Luodaan ulkoisen validoinnin taulukko sisäisen validoinnin taulukon pohjalta:
+ulkoinen_validointi <- sisainen_validointi %>% select(1:2)
+ulkoinen_validointi <- head(ulkoinen_validointi, -4)
+
+# Annetaan kehyksille lopulliset nimet:
+kehysten_nimet <- c("19) Lapset ja nuoret",
+                    "10) Työ ja yrittäjyys", 
+                    "17) Hyvinvointialueet",
+                    "2) Asiantuntijuus",
+                    "3) Eläimet",
+                    "16) Järjestelmän turvaaminen",
+                    "8) Muuttuva yhteiskuntamalli",
+                    "18) Kansainvälinen kilpailukyky",
+                    "11) Ulko- ja turvallisuuspolitiikan päämäärä",
+                    "-",
+                    "12) Palveluiden uudistus",
+                    "14) Kansalaisten vointi",
+                    "7) Palvelutaso",
+                    "-",
+                    "-",
+                    "-",
+                    "-")
+
+# Luodaan muut saraketiedot: 
+sopivat <- c("9/10",
+             "10/10",
+             "10/10",
+             "10/10",
+             "10/10",
+             "9/10",
+             "8/10",
+             "8/10",
+             "9/10",
+             "7/10",
+             "10/10",
+             "10/10",
+             "10/10",
+             "6/10",
+             "1/10",
+             "1/10",
+             "1/10")
+
+tulos <- c("Validi",
+           "Validi",
+           "Validi",
+           "Validi",
+           "Validi",
+           "Validi",
+           "Validi",
+           "Validi",
+           "Validi",
+           "Hylätään",
+           "Validi",
+           "Validi",
+           "Validi",
+           "Hylätään",
+           "Hylätään",
+           "Hylätään",
+           "Hylätään")
+
+muutos <- c("Ei muutosta",
+            "Muutettu",
+            "Muutettu",
+            "Muutettu",
+            "Muutettu",
+            "Muutettu",
+            "Muutettu",
+            "Muutettu",
+            "Muutettu",
+            "-",
+            "Ei muutosta",
+            "Muutettu",
+            "Muutettu",
+            "-",
+            "-",
+            "-",
+            "-")
+
+# Liitetään kehysten nimet ja muut uudet tiedot taulukkopohjaan:
+ulkoinen_validointi$Sopivat <- sopivat
+ulkoinen_validointi$Tulos <- tulos
+ulkoinen_validointi$Muutos <- muutos
+ulkoinen_validointi$Nimet <- kehysten_nimet
+
+# Nimetään sarakkeet täsmällisemmin:
+colnames(ulkoinen_validointi)[3] = "Kehykseen sopivat virkkeet"
+colnames(ulkoinen_validointi)[4] = "Ulkoisen validoinnin tulos"
+colnames(ulkoinen_validointi)[5] = "Muutos kehyksen nimessä"
+colnames(ulkoinen_validointi)[6] = "Kehyksen lopullinen nimi"
+
+
+# Luodaan taulukosta csv-tiedosto, josta tiedot voidaan tuoda Word-tiedostoon:
+write.csv2(ulkoinen_validointi, "UlkoinenValidointi.csv", row.names = F)
+
+# Ohje: Avaa csv-tiedosto Notepad-ohjelmassa ja kopioi kaikki teksti. Liitä teksti Word-tiedostoon. Valitse teksti ja muuta se taulukoksi (Lisää/Insert > Taulukko/Table > Muunna teksti taulukoksi / Covert text to table). Etsi ja korvaa taulukosta kaikki "-merkit. Muuta prosenttiosuuksista pisteet desimaalipilkuiksi.
+```
+
